@@ -138,11 +138,11 @@ class EyeRenderer:
         target_eye_size = 80
         eyes.adjust_size(target_eye_size - eyes.EYE_WIDTH)
 
-        current_mood = "neutral"
+        current_mood = None  # Don't render until first mood arrives.
         last_blink = time.monotonic()
         last_mood_refresh = time.monotonic()
 
-        logger.info("Pygame initialized, entering render loop")
+        logger.info("Pygame initialized, waiting for first mood")
 
         while self._running:
             # Check for mood changes from the async side.
@@ -152,6 +152,15 @@ class EyeRenderer:
                     current_mood = new_mood
             except queue.Empty:
                 pass
+
+            # Wait for first mood before rendering anything.
+            if current_mood is None:
+                # Show black screen while idle.
+                screen.fill((0, 0, 0))
+                if lcd is not None:
+                    lcd.display(self._surface_to_pil(screen))
+                clock.tick(TARGET_FPS)
+                continue
 
             # Apply mood + color scheme.
             mapping = MOOD_MAP.get(current_mood, MOOD_MAP["neutral"])
