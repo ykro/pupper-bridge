@@ -1,0 +1,19 @@
+[project]
+name = "pupper-bridge"
+version = "0.2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+    "numpy>=1.26.0",
+    "opencv-python-headless>=4.9.0",
+    "pygame>=2.5.0",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+pi = []  # MangDang BSP + spidev installed system-wide on Pi
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
