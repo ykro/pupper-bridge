@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 controller = create_controller()
 _is_mock = isinstance(controller, MockHardwareController)
-eye_renderer = EyeRenderer(mock=_is_mock)
+eye_renderer: EyeRenderer | None = None
 
 # Mood -> body action mapping (from pupper-sentiment).
 MOOD_ACTIONS = {
@@ -40,10 +40,11 @@ MOOD_ACTIONS = {
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and shut down the controller and eye renderer with the app."""
+    global eye_renderer
     await controller.initialize()
-    eye_renderer.start()
     yield
-    eye_renderer.stop()
+    if eye_renderer is not None:
+        eye_renderer.stop()
     await controller.shutdown()
 
 
@@ -135,18 +136,27 @@ async def stop():
     return {"status": "stopped"}
 
 
+def _ensure_eyes() -> EyeRenderer:
+    """Lazy-init the EyeRenderer on first use."""
+    global eye_renderer
+    if eye_renderer is None:
+        eye_renderer = EyeRenderer(mock=_is_mock)
+        eye_renderer.start()
+    return eye_renderer
+
+
 @app.post("/eyes")
 async def set_eyes(req: MoodRequest):
     """Update LCD eye expression based on mood."""
-    eye_renderer.set_mood(req.mood)
+    _ensure_eyes().set_mood(req.mood)
     return {"status": "ok", "mood": req.mood}
 
 
 @app.post("/react")
 async def react(req: MoodRequest, background_tasks: BackgroundTasks):
     """Combined reaction: eyes + pose + dance for a given mood."""
-    # Update eyes immediately.
-    eye_renderer.set_mood(req.mood)
+    # Update eyes on first /react call (lazy init).
+    _ensure_eyes().set_mood(req.mood)
 
     # Look up body action.
     action = MOOD_ACTIONS.get(req.mood, {"pose": "stand"})
