@@ -32,6 +32,28 @@ logger = logging.getLogger(__name__)
 _WEB_URL = "http://localhost:8080/stream?topic=/camera/image_raw&type=ros_compressed"
 _latest_ros_frame: bytes | None = None
 
+# Lazy OpenCV capture handle (primary source — direct Pi camera access).
+_cv_cap = None
+_cv_tried = False
+
+
+def _get_cv_cap():
+    """Lazy-open /dev/video0 via OpenCV. Returns None if unavailable."""
+    global _cv_cap, _cv_tried
+    if _cv_tried:
+        return _cv_cap
+    _cv_tried = True
+    try:
+        cap = cv2.VideoCapture(0)
+        if cap.isOpened():
+            logger.info("OpenCV camera opened (device 0)")
+            _cv_cap = cap
+        else:
+            logger.info("OpenCV device 0 not openable — falling back")
+    except Exception as exc:
+        logger.warning("OpenCV camera init failed: %s", exc)
+    return _cv_cap
+
 
 def _generate_mock_frame() -> bytes:
     """Generate a mock JPEG frame with a colored rectangle and text."""
@@ -62,7 +84,18 @@ def _generate_mock_frame() -> bytes:
 
 async def capture_frame() -> bytes:
     """Capture a single JPEG frame from the best available source."""
-    # Try the web interface first
+    # Primary: direct OpenCV access to /dev/video0 (Pi camera).
+    cap = _get_cv_cap()
+    if cap is not None:
+        ret, frame = cap.read()
+        if ret:
+            frame = cv2.resize(frame, (640, 480))
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            if ok:
+                return buf.tobytes()
+        logger.warning("OpenCV read failed, trying fallbacks")
+
+    # Fallback: web interface stream (ROS camera HTTP snapshot).
     if _HTTPX_AVAILABLE:
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
@@ -72,11 +105,11 @@ async def capture_frame() -> bytes:
         except Exception:
             logger.debug("Web interface camera unavailable, trying alternatives")
 
-    # Try ROS2 topic
+    # Fallback: ROS2 topic (if rclpy running).
     if _ROS_AVAILABLE and _latest_ros_frame is not None:
         return _latest_ros_frame
 
-    # Fallback to mock
+    # Last resort: mock frame.
     logger.debug("Using mock camera frame")
     return _generate_mock_frame()
 
