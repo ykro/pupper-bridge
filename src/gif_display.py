@@ -13,10 +13,29 @@ import sys
 import threading
 import time
 
+import pathlib
+
 import pygame
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+
+def _add_eyes_lib_to_path():
+    vendor_dir = pathlib.Path(__file__).parent.parent / "vendor" / "eyes-animation" / "src"
+    if str(vendor_dir) not in sys.path:
+        sys.path.insert(0, str(vendor_dir))
+
+
+# Map pupper-talk mood names -> eyes-animation MoodState + ColorScheme names.
+_SENTIMENT_LIB_MAP = {
+    "happy": ("HAPPY", "ENERGY"),
+    "sad": ("NORMAL", "ICE"),
+    "angry": ("CONFUSED", "BLOOD"),
+    "surprised": ("SURPRISED", "NEON"),
+    "neutral": ("NORMAL", "CYBER"),
+    "curious": ("CONFUSED", "AMBER"),
+}
 
 LCD_WIDTH = 320
 LCD_HEIGHT = 240
@@ -347,6 +366,24 @@ class GifDisplay:
         lcd = None if self._mock else self._create_lcd()
         render_surface = pygame.Surface((LCD_WIDTH, LCD_HEIGHT))
 
+        # Lazy-load sentiment eyes library (vendored from pupper-sentiment).
+        lib_eyes = None
+        lib_MoodState = None
+        lib_ColorScheme = None
+        lib_last_refresh = 0.0
+        try:
+            _add_eyes_lib_to_path()
+            from eyes.animation import Eyes as _LibEyes
+            from eyes.config import ColorScheme as _LibColorScheme
+            from eyes.config import MoodState as _LibMoodState
+            lib_eyes = _LibEyes(screen_width=LCD_WIDTH, screen_height=LCD_HEIGHT)
+            lib_eyes.adjust_size(80 - lib_eyes.EYE_WIDTH)
+            lib_MoodState = _LibMoodState
+            lib_ColorScheme = _LibColorScheme
+            logger.info("Sentiment eyes library loaded")
+        except Exception as exc:
+            logger.warning("Sentiment eyes library unavailable: %s", exc)
+
         if self._current_gif:
             self._load_gif_frames(self._current_gif)
         else:
@@ -456,45 +493,58 @@ class GifDisplay:
                 except queue.Empty:
                     pass
 
-                # Smooth interpolation — target colors depend on style.
-                if color_style == "sentiment":
-                    target_colors = _SENTIMENT_COLORS.get(current_mood, _SENTIMENT_COLORS["neutral"])
+                if color_style == "sentiment" and lib_eyes is not None:
+                    # Use vendored eyes-animation library (same as pupper-sentiment).
+                    mood_name, color_name = _SENTIMENT_LIB_MAP.get(
+                        current_mood, _SENTIMENT_LIB_MAP["neutral"]
+                    )
+                    mood_enum = getattr(lib_MoodState, mood_name, lib_MoodState.NORMAL)
+                    color_enum = getattr(lib_ColorScheme, color_name, lib_ColorScheme.CYBER)
+                    lib_eyes.set_mood(mood_enum)
+                    lib_eyes.effects.current_scheme = color_enum
+                    # Re-send mood every 1.5s to prevent auto-decay.
+                    if now - lib_last_refresh > 1.5:
+                        lib_eyes.set_mood(mood_enum)
+                        lib_last_refresh = now
+                    lib_eyes.update()
+                    render_surface.fill(BLACK)
+                    lib_eyes.draw(render_surface)
                 else:
+                    # Bumblebee-style Autobot eyes.
                     target_colors = _BEE_YELLOW
-                target_shape = _MOOD_SHAPE.get(current_mood, _MOOD_SHAPE["neutral"])
-                ls = 4.0 * dt
-                for key in active_colors:
-                    active_colors[key] = _lerp_color(active_colors[key], target_colors[key], ls)
-                for key in active_shape:
-                    active_shape[key] += (target_shape[key] - active_shape[key]) * ls
+                    target_shape = _MOOD_SHAPE.get(current_mood, _MOOD_SHAPE["neutral"])
+                    ls = 4.0 * dt
+                    for key in active_colors:
+                        active_colors[key] = _lerp_color(active_colors[key], target_colors[key], ls)
+                    for key in active_shape:
+                        active_shape[key] += (target_shape[key] - active_shape[key]) * ls
 
-                # Blink
-                if blink_start is None and now >= next_blink:
-                    blink_start = now
-                blink_t = 0.0
-                if blink_start is not None:
-                    elapsed = now - blink_start
-                    if elapsed < BLINK_DURATION:
-                        half = BLINK_DURATION / 2
-                        blink_t = elapsed/half if elapsed < half else (BLINK_DURATION-elapsed)/half
-                        blink_t = max(0.0, min(1.0, blink_t))
-                    else:
-                        blink_start = None
-                        next_blink = now + random.uniform(BLINK_INTERVAL_MIN, BLINK_INTERVAL_MAX)
+                    if blink_start is None and now >= next_blink:
+                        blink_start = now
+                    blink_t = 0.0
+                    if blink_start is not None:
+                        elapsed = now - blink_start
+                        if elapsed < BLINK_DURATION:
+                            half = BLINK_DURATION / 2
+                            blink_t = elapsed/half if elapsed < half else (BLINK_DURATION-elapsed)/half
+                            blink_t = max(0.0, min(1.0, blink_t))
+                        else:
+                            blink_start = None
+                            next_blink = now + random.uniform(BLINK_INTERVAL_MIN, BLINK_INTERVAL_MAX)
 
-                cx = LCD_WIDTH // 2
-                cy = EYE_CENTER_Y + int(active_shape["y_offset"])
-                lcx = cx - EYE_SPACING // 2
-                rcx = cx + EYE_SPACING // 2
-                vs = active_shape["squash"]
+                    cx = LCD_WIDTH // 2
+                    cy = EYE_CENTER_Y + int(active_shape["y_offset"])
+                    lcx = cx - EYE_SPACING // 2
+                    rcx = cx + EYE_SPACING // 2
+                    vs = active_shape["squash"]
 
-                render_surface.fill(BLACK)
-                self._draw_visor(render_surface, active_colors, lcx, rcx, cy, vs, blink_t)
-                self._draw_eye(render_surface, lcx, cy,
-                               active_shape["scale"]*active_shape["left_scale"], vs, active_colors, blink_t, now)
-                self._draw_eye(render_surface, rcx, cy,
-                               active_shape["scale"]*active_shape["right_scale"], vs, active_colors, blink_t, now)
-                self._draw_mouth(render_surface, active_colors, speaking, now)
+                    render_surface.fill(BLACK)
+                    self._draw_visor(render_surface, active_colors, lcx, rcx, cy, vs, blink_t)
+                    self._draw_eye(render_surface, lcx, cy,
+                                   active_shape["scale"]*active_shape["left_scale"], vs, active_colors, blink_t, now)
+                    self._draw_eye(render_surface, rcx, cy,
+                                   active_shape["scale"]*active_shape["right_scale"], vs, active_colors, blink_t, now)
+                    self._draw_mouth(render_surface, active_colors, speaking, now)
 
                 if self._mock:
                     scaled = pygame.transform.scale(render_surface, (LCD_WIDTH*MOCK_SCALE, LCD_HEIGHT*MOCK_SCALE))
