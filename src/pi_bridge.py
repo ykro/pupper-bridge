@@ -283,7 +283,7 @@ async def camera_frame():
     """Capture and return a JPEG frame from the camera. Also displayed on LCD."""
     frame_bytes = await capture_frame()
     if display is not None:
-        display.show_frame(frame_bytes, duration=5.0)
+        display.show_frame(frame_bytes, duration=float("inf"))
     _mark_alive()
     return Response(content=frame_bytes, media_type="image/jpeg")
 

@@ -459,6 +459,8 @@ class GifDisplay:
                     if new_gif != self._current_gif:
                         self._load_gif_frames(new_gif)
                         frame_idx = 0
+                        frame_surface = None
+                        frame_until = 0.0
                 except queue.Empty:
                     pass
             else:
