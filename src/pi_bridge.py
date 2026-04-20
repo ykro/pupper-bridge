@@ -8,6 +8,7 @@ Port: 9090
 
 import asyncio
 import logging
+import pathlib
 from contextlib import asynccontextmanager
 from enum import Enum
 
@@ -15,7 +16,7 @@ from fastapi import BackgroundTasks, FastAPI, Response
 from pydantic import BaseModel, Field
 
 from src.camera_capture import capture_frame
-from src.eye_renderer import EyeRenderer
+from src.gif_display import GifDisplay
 from src.hardware_controller import MockHardwareController, create_controller
 from src.lidar_reader import detect_people, get_latest_scan
 
@@ -24,7 +25,14 @@ logger = logging.getLogger(__name__)
 
 controller = create_controller()
 _is_mock = isinstance(controller, MockHardwareController)
-eye_renderer: EyeRenderer | None = None
+
+ASSETS_DIR = pathlib.Path(__file__).parent.parent / "assets"
+display: GifDisplay | None = None
+
+MODE_GIFS = {
+    "live": "live.gif", "rocky": "rocky.gif", "bumblebee": "bumblebee.gif",
+    "vision": "vision.gif", "quiz": "quiz.gif", "code": "code.gif",
+}
 
 # Mood -> body action mapping (from pupper-sentiment).
 MOOD_ACTIONS = {
@@ -39,12 +47,14 @@ MOOD_ACTIONS = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize and shut down the controller and eye renderer with the app."""
-    global eye_renderer
+    """Initialize and shut down the controller and display with the app."""
+    global display
     await controller.initialize()
+    display = GifDisplay(gif_path=None, mock=_is_mock, ready_text="bridge ready")
+    display.start()
     yield
-    if eye_renderer is not None:
-        eye_renderer.stop()
+    if display is not None:
+        display.stop()
     await controller.shutdown()
 
 
@@ -89,6 +99,18 @@ class DanceRequest(BaseModel):
 
 class MoodRequest(BaseModel):
     mood: str = Field(description="Mood name: happy, sad, angry, surprised, neutral, curious")
+
+
+class DisplayModeRequest(BaseModel):
+    mode: str = Field(description="Mode name for GIF: live, rocky, bumblebee, vision, quiz, code")
+
+
+class DisplayEyesRequest(BaseModel):
+    style: str = Field(description="Eye style: bumblebee or sentiment")
+
+
+class DisplaySpeakingRequest(BaseModel):
+    speaking: bool = Field(description="Whether Bumblebee mouth should animate")
 
 
 class NavGoalRequest(BaseModel):
@@ -136,37 +158,27 @@ async def stop():
     return {"status": "stopped"}
 
 
-def _ensure_eyes() -> EyeRenderer:
-    """Lazy-init the EyeRenderer on first use."""
-    global eye_renderer
-    if eye_renderer is None:
-        eye_renderer = EyeRenderer(mock=_is_mock)
-        eye_renderer.start()
-    return eye_renderer
-
-
 @app.post("/eyes")
 async def set_eyes(req: MoodRequest):
-    """Update LCD eye expression based on mood."""
-    _ensure_eyes().set_mood(req.mood)
+    """Update LCD eye expression based on mood (sets sentiment style)."""
+    if display is not None:
+        display.switch_to_eyes("sentiment")
+        display.set_mood(req.mood)
     return {"status": "ok", "mood": req.mood}
 
 
 @app.post("/react")
 async def react(req: MoodRequest, background_tasks: BackgroundTasks):
     """Combined reaction: eyes + pose + dance for a given mood."""
-    # Update eyes on first /react call (lazy init).
-    _ensure_eyes().set_mood(req.mood)
+    if display is not None:
+        display.set_mood(req.mood)
 
-    # Look up body action.
     action = MOOD_ACTIONS.get(req.mood, {"pose": "stand"})
     pose = action.get("pose", "stand")
     dance_style = action.get("dance")
 
-    # Set pose.
     await controller.set_pose(pose)
 
-    # Start dance in background if specified.
     if dance_style:
         background_tasks.add_task(controller.start_dance, dance_style)
 
@@ -176,6 +188,43 @@ async def react(req: MoodRequest, background_tasks: BackgroundTasks):
         "pose": pose,
         "dance": dance_style,
     }
+
+
+@app.post("/display/gif")
+async def display_gif(req: DisplayModeRequest):
+    """Switch LCD to a mode's GIF (live, rocky, bumblebee, vision, quiz, code)."""
+    gif_name = MODE_GIFS.get(req.mode)
+    if gif_name is None:
+        return {"status": "error", "message": f"Unknown mode: {req.mode}"}
+    if display is not None:
+        display.switch_to_gif(str(ASSETS_DIR / gif_name))
+    return {"status": "ok", "mode": req.mode}
+
+
+@app.post("/display/eyes")
+async def display_eyes(req: DisplayEyesRequest):
+    """Switch LCD to eye rendering (bumblebee or sentiment style)."""
+    if req.style not in ("bumblebee", "sentiment"):
+        return {"status": "error", "message": f"Unknown style: {req.style}"}
+    if display is not None:
+        display.switch_to_eyes(req.style)
+    return {"status": "ok", "style": req.style}
+
+
+@app.post("/display/mood")
+async def display_mood(req: MoodRequest):
+    """Set the current mood for eye rendering (color/shape for sentiment)."""
+    if display is not None:
+        display.set_mood(req.mood)
+    return {"status": "ok", "mood": req.mood}
+
+
+@app.post("/display/speaking")
+async def display_speaking(req: DisplaySpeakingRequest):
+    """Toggle Bumblebee mouth animation."""
+    if display is not None:
+        display.set_speaking(req.speaking)
+    return {"status": "ok", "speaking": req.speaking}
 
 
 @app.get("/camera/frame")
