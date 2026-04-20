@@ -9,6 +9,7 @@ Port: 9090
 import asyncio
 import logging
 import pathlib
+import time
 from contextlib import asynccontextmanager
 from enum import Enum
 
@@ -34,6 +35,13 @@ MODE_GIFS = {
     "vision": "vision.gif", "quiz": "quiz.gif", "code": "code.gif",
 }
 
+# Connection tracking — if no heartbeat within this many seconds, revert LCD.
+HEARTBEAT_TIMEOUT_S = 8.0
+HEARTBEAT_CHECK_INTERVAL_S = 2.0
+
+_last_heartbeat_ts: float = 0.0
+_connected = False
+
 # Mood -> body action mapping (from pupper-sentiment).
 MOOD_ACTIONS = {
     "happy": {"pose": "excited", "dance": "wiggle"},
@@ -45,6 +53,20 @@ MOOD_ACTIONS = {
 }
 
 
+async def _heartbeat_monitor():
+    """Revert LCD to ready text if no heartbeat received within timeout."""
+    global _connected
+    while True:
+        await asyncio.sleep(HEARTBEAT_CHECK_INTERVAL_S)
+        if not _connected:
+            continue
+        if time.monotonic() - _last_heartbeat_ts > HEARTBEAT_TIMEOUT_S:
+            logger.warning("Heartbeat timeout — reverting display to ready text")
+            if display is not None:
+                display.switch_to_ready()
+            _connected = False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and shut down the controller and display with the app."""
@@ -52,7 +74,9 @@ async def lifespan(app: FastAPI):
     await controller.initialize()
     display = GifDisplay(gif_path=None, mock=_is_mock, ready_text="bridge ready")
     display.start()
+    monitor_task = asyncio.create_task(_heartbeat_monitor())
     yield
+    monitor_task.cancel()
     if display is not None:
         display.stop()
     await controller.shutdown()
@@ -190,6 +214,12 @@ async def react(req: MoodRequest, background_tasks: BackgroundTasks):
     }
 
 
+def _mark_alive() -> None:
+    global _connected, _last_heartbeat_ts
+    _last_heartbeat_ts = time.monotonic()
+    _connected = True
+
+
 @app.post("/display/gif")
 async def display_gif(req: DisplayModeRequest):
     """Switch LCD to a mode's GIF (live, rocky, bumblebee, vision, quiz, code)."""
@@ -198,6 +228,7 @@ async def display_gif(req: DisplayModeRequest):
         return {"status": "error", "message": f"Unknown mode: {req.mode}"}
     if display is not None:
         display.switch_to_gif(str(ASSETS_DIR / gif_name))
+    _mark_alive()
     return {"status": "ok", "mode": req.mode}
 
 
@@ -208,6 +239,7 @@ async def display_eyes(req: DisplayEyesRequest):
         return {"status": "error", "message": f"Unknown style: {req.style}"}
     if display is not None:
         display.switch_to_eyes(req.style)
+    _mark_alive()
     return {"status": "ok", "style": req.style}
 
 
@@ -216,6 +248,7 @@ async def display_mood(req: MoodRequest):
     """Set the current mood for eye rendering (color/shape for sentiment)."""
     if display is not None:
         display.set_mood(req.mood)
+    _mark_alive()
     return {"status": "ok", "mood": req.mood}
 
 
@@ -224,7 +257,25 @@ async def display_speaking(req: DisplaySpeakingRequest):
     """Toggle Bumblebee mouth animation."""
     if display is not None:
         display.set_speaking(req.speaking)
+    _mark_alive()
     return {"status": "ok", "speaking": req.speaking}
+
+
+@app.post("/heartbeat")
+async def heartbeat():
+    """Laptop pings this periodically; resets disconnect timer."""
+    _mark_alive()
+    return {"status": "ok"}
+
+
+@app.post("/disconnect")
+async def disconnect():
+    """Laptop calls this on clean shutdown — immediately revert LCD."""
+    global _connected
+    _connected = False
+    if display is not None:
+        display.switch_to_ready()
+    return {"status": "ok"}
 
 
 @app.get("/camera/frame")
