@@ -153,6 +153,7 @@ class GifDisplay:
         self._eye_color_style = "bumblebee"  # "bumblebee" or "sentiment"
         self._color_style_queue: queue.Queue[str] = queue.Queue()
         self._ready_queue: queue.Queue[bool] = queue.Queue()
+        self._frame_queue: queue.Queue[tuple[bytes, float]] = queue.Queue()
 
     # -- Public API ---------------------------------------------------------
 
@@ -177,6 +178,10 @@ class GifDisplay:
     def set_speaking(self, speaking: bool) -> None:
         """Thread-safe speaking state (eye mode only)."""
         self._speaking_queue.put(speaking)
+
+    def show_frame(self, jpeg_bytes: bytes, duration: float = 5.0) -> None:
+        """Render a JPEG frame on the display for `duration` seconds (then back to GIF)."""
+        self._frame_queue.put((jpeg_bytes, duration))
 
     def switch_to_ready(self) -> None:
         """Revert LCD to the startup ready text (e.g. on disconnect)."""
@@ -409,6 +414,10 @@ class GifDisplay:
         next_blink = time.monotonic() + random.uniform(BLINK_INTERVAL_MIN, BLINK_INTERVAL_MAX)
         blink_start = None
 
+        # Static frame state (for vision captures).
+        frame_surface = None
+        frame_until = 0.0
+
         while self._running:
             now = time.monotonic()
 
@@ -464,6 +473,37 @@ class GifDisplay:
                 if event.type == pygame.QUIT:
                     self._running = False
                     return
+
+            # Check for queued static frames (vision captures).
+            try:
+                while True:
+                    jpeg_bytes, duration = self._frame_queue.get_nowait()
+                    try:
+                        import io
+                        img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB").resize((LCD_WIDTH, LCD_HEIGHT))
+                        raw = img.tobytes()
+                        frame_surface = pygame.image.fromstring(raw, (LCD_WIDTH, LCD_HEIGHT), "RGB")
+                        frame_until = now + duration
+                    except Exception as exc:
+                        logger.warning("Failed to load frame: %s", exc)
+            except queue.Empty:
+                pass
+
+            # Render static frame (overrides gif, but not eye_mode).
+            if frame_surface is not None and now < frame_until and not eye_mode:
+                if self._mock:
+                    scaled = pygame.transform.scale(frame_surface, (LCD_WIDTH*MOCK_SCALE, LCD_HEIGHT*MOCK_SCALE))
+                    screen.blit(scaled, (0, 0))
+                    pygame.display.flip()
+                else:
+                    screen.blit(frame_surface, (0, 0))
+                    if lcd:
+                        pil_image = self._surface_to_pil(screen)
+                        lcd.display(pil_image)
+                clock.tick(30)
+                continue
+            elif frame_surface is not None and now >= frame_until:
+                frame_surface = None
 
             if eye_mode:
                 # -- Eye rendering --
